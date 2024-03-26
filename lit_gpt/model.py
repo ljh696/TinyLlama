@@ -22,18 +22,26 @@ FlashAttention2Available = RequirementCache("flash-attn>=2.0.0.post1")
 class GPT(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
+        #通常指词汇表加上额外标记后的大小（表项数）,比如代表起止的特殊token
         assert config.padded_vocab_size is not None
         self.config = config
 
+        #通过线性层将Transformer模型的hidden state映射到词汇表中每个token（包括特殊符号）的概率向量
         self.lm_head = nn.Linear(config.n_embd, config.padded_vocab_size, bias=False)
         self.transformer = nn.ModuleDict(
             dict(
+                #嵌入层:将输入的token映射为embedding vector
                 wte=nn.Embedding(config.padded_vocab_size, config.n_embd),
+                #由多个Block组成的模块，数量共为config.n_layer
+                #ModuleList可以看作
+                #but modules it contains are properly registered, and will be visible by all Module methods.
                 h=nn.ModuleList(Block(config) for _ in range(config.n_layer)),
+                #layernorm层，eps为一个小值防止分母为0
                 ln_f=config.norm_class(config.n_embd, eps=config.norm_eps),
             )
         )
         self.rope_cache: Optional[RoPECache] = None
+        #mask_cache可以存储一个张量也可以存储为None
         self.mask_cache: Optional[torch.Tensor] = None
         self.kv_caches: List[KVCache] = []
 
@@ -64,6 +72,7 @@ class GPT(nn.Module):
     def forward(
         self, idx: torch.Tensor, max_seq_length: Optional[int] = None, input_pos: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        #B:batch size,T:seq_length 
         B, T = idx.size()
         use_kv_cache = input_pos is not None
 
@@ -77,6 +86,7 @@ class GPT(nn.Module):
         assert max_seq_length <= block_size, f"Cannot attend to {max_seq_length}, block size is only {block_size}"
         assert block_size >= T, f"Cannot forward sequence of length {T}, block size is only {block_size}"
 
+        #初始化RoPE（Rotary Position Encoding）缓存
         if self.rope_cache is None:
             self.rope_cache = self.build_rope_cache(idx)
         # passing `attn_mask` to SDPA downgrades it to use the inefficient implementation. since we only need the mask
@@ -98,8 +108,10 @@ class GPT(nn.Module):
             mask = None
 
         # forward the model itself
+        # WTE:Word Token Embeddings
         x = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-            
+        
+        #若干block 
         if not use_kv_cache:
             for block in self.transformer.h:
                 x, *_ = block(x, (cos, sin), max_seq_length)
@@ -150,7 +162,9 @@ class GPT(nn.Module):
 class Block(nn.Module):
     def __init__(self, config: Config) -> None:
         super().__init__()
+        #normalization
         self.norm_1 = config.norm_class(config.n_embd, eps=config.norm_eps)
+        #attention
         self.attn = CausalSelfAttention(config)
         if not config.shared_attention_norm:
             self.norm_2 = config.norm_class(config.n_embd, eps=config.norm_eps)

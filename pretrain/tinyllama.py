@@ -7,6 +7,8 @@ from typing import Optional, Tuple, Union
 import math
 import lightning as L
 import torch
+from icecream import ic
+ic.configureOutput(prefix=f'Debug | ', includeContext=True)
 from lightning.fabric.strategies import FSDPStrategy, XLAStrategy
 from torch.utils.data import DataLoader
 from functools import partial
@@ -23,21 +25,23 @@ from pytorch_lightning.loggers import WandbLogger
 from lit_gpt import FusedCrossEntropyLoss
 import random
 
-model_name = "tiny_LLaMA_1b"
-name = "tinyllama_1b"
+#model_name = "tiny_LLaMA_1b"
+model_name = "pythia-70m"
+#name = "tinyllama_1b"
+name = "pythia_70m"
 out_dir = Path("out") / name
 
 # Hyperparameters
-num_of_devices = 8
-global_batch_size = 512
+num_of_devices = 1 #!8
+global_batch_size = 1 #!512
 learning_rate = 4e-4
-micro_batch_size = 8
-max_step = 715256 * 2
+micro_batch_size = 1 #!8
+max_step = 100 #!715256 * 2
 warmup_steps = 2000
 log_step_interval = 10
 eval_iters = 100
-save_step_interval = 5000
-eval_step_interval = 5000
+save_step_interval = 50 #5000
+eval_step_interval = 100 #5000
 
 
 weight_decay = 1e-1
@@ -48,11 +52,9 @@ decay_lr = True
 min_lr = 4e-5
 
 batch_size = global_batch_size // num_of_devices
-gradient_accumulation_steps = batch_size // micro_batch_size
+gradient_accumulation_steps = batch_size // micro_batch_size #每隔micro_batch_size在本设备进行一次梯度更新
 assert gradient_accumulation_steps > 0
 warmup_iters = warmup_steps * gradient_accumulation_steps
-
-
 
 
 max_iters = max_step * gradient_accumulation_steps
@@ -61,9 +63,11 @@ log_iter_interval = log_step_interval * gradient_accumulation_steps
 
 
 # Treat all dataset equally by their size. If you want to use a different weight for a dataset, add it to the list with the weight.
+# 使用训练集,分配其训练权重
 train_data_config = [
-    ("train_slim", 0.693584),
-    ("train_star", 0.306416),
+    #("train_slim", 0.693584),
+    #("train_star", 0.306416),
+    ("train_slim", 1.0),
 ]
 
 val_data_config = [
@@ -98,7 +102,7 @@ def setup(
                 limit_all_gathers=True,
                 cpu_offload=False,
             )
-    else:
+    else:  #单设备时策略为"auto"
         strategy = "auto"
 
     fabric = L.Fabric(devices=devices, strategy=strategy, precision=precision, loggers=[logger, wandb_logger])
@@ -113,7 +117,9 @@ def main(fabric, train_data_dir, val_data_dir, resume):
     if fabric.global_rank == 0:
         out_dir.mkdir(parents=True, exist_ok=True)
 
-    config = Config.from_name(model_name)
+    config = Config.from_name(model_name) #获取model config dict
+    # !!!add!!!
+    #config.n_layer = 4
 
     train_dataloader, val_dataloader = create_dataloaders(
         batch_size=micro_batch_size,
@@ -136,11 +142,12 @@ def main(fabric, train_data_dir, val_data_dir, resume):
         model = GPT(config)
         model.apply(partial(model._init_weights ,n_layer=config.n_layer))
  
-
+    #读取模型config,应用到类GPT,并初始化模型参数
     fabric.print(f"Time to instantiate model: {time.perf_counter() - t0:.02f} seconds.")
     fabric.print(f"Total parameters {num_parameters(model):,}")
 
     model = fabric.setup(model)
+    #AdamW优化器
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(beta1, beta2), foreach=False
     )
@@ -163,6 +170,7 @@ def main(fabric, train_data_dir, val_data_dir, resume):
 
 
 def train(fabric, state, train_dataloader, val_dataloader, monitor, resume):
+    print(train_dataloader)
     model = state["model"]
     optimizer = state["optimizer"]
 
@@ -297,7 +305,7 @@ def validate(fabric: L.Fabric, model: torch.nn.Module, val_dataloader: DataLoade
     model.train()
     return out
 
-
+# error!!!
 def create_dataloader(
     batch_size: int, block_size: int, data_dir: Path, fabric, shuffle: bool = True, seed: int = 12345, split="train"
 ) -> DataLoader:
@@ -305,6 +313,7 @@ def create_dataloader(
     data_config = train_data_config if split == "train" else val_data_config
     for prefix, _ in data_config:
         filenames = sorted(glob.glob(str(data_dir / f"{prefix}*")))
+        #glob查找data_dir/*下所有文件并返回列表,sorted排序
         random.seed(seed)
         random.shuffle(filenames)
 
@@ -313,7 +322,7 @@ def create_dataloader(
             # n_chunks control the buffer size. 
             # Note that the buffer size also impacts the random shuffle
             # (PackedDataset is an IterableDataset. So the shuffle is done by prefetch a buffer and shuffle the buffer)
-            n_chunks=8,
+            n_chunks=1, #!8
             block_size=block_size,
             shuffle=shuffle,
             seed=seed+fabric.global_rank,
@@ -351,7 +360,7 @@ def create_dataloaders(
         block_size=effective_block_size,
         fabric=fabric,
         data_dir=train_data_dir,
-        shuffle=True,
+        shuffle=True, #数据打乱
         seed=seed,
         split="train"
     )
@@ -392,5 +401,26 @@ if __name__ == "__main__":
     torch.set_float32_matmul_precision("high")
 
     from jsonargparse import CLI
-
+    #CLI:command-line interfaces,为setup创建命令行接口,--help可以展示函数所有可选命令行参数
+    # usage: tinyllama.py [-h] [--config CONFIG] [--print_config[=flags]] [--devices DEVICES] 
+    #[--train_data_dir TRAIN_DATA_DIR] [--val_data_dir VAL_DATA_DIR] [--precision PRECISION] 
+    #[--tpu {true,false}] [--resume RESUME]
+    '''
+    optional arguments:
+        -h, --help            Show this help message and exit.
+        --config CONFIG       Path to a configuration file.
+        --print_config[=flags]
+                                Print the configuration after applying all other arguments and exit. The optional flags customizes the
+                                output and are one or more keywords separated by comma. The supported flags are: comments, skip_default,
+                                skip_null.
+        --devices DEVICES     (type: int, default: 8)
+        --train_data_dir TRAIN_DATA_DIR
+                                (type: <class 'Path'>, default: data/redpajama_sample)
+        --val_data_dir VAL_DATA_DIR
+                                (type: Union[Path, null], default: null)
+        --precision PRECISION
+                                (type: Union[str, null], default: null)
+        --tpu {true,false}    (type: bool, default: False)
+        --resume RESUME       (type: Union[bool, Path], default: False)
+    '''
     CLI(setup)

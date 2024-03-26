@@ -8,7 +8,8 @@ import torch
 class Tokenizer:
     def __init__(self, checkpoint_dir: Path) -> None:
         # some checkpoints have both files, `.model` takes precedence
-        if (vocabulary_path := checkpoint_dir / "tokenizer.model").is_file():
+        #拼接路径并检查是否为一个文件
+        if (vocabulary_path := checkpoint_dir / "tokenizer.model").is_file(): 
             from sentencepiece import SentencePieceProcessor
 
             self.processor = SentencePieceProcessor(model_file=str(vocabulary_path))
@@ -20,9 +21,9 @@ class Tokenizer:
 
             self.processor = HFTokenizer.from_file(str(vocabulary_path))
             self.backend = "huggingface"
-            with open(checkpoint_dir / "tokenizer_config.json") as fp:
+            with open(checkpoint_dir / "tokenizer_config.json") as fp: #hugging face还需要config
                 config = json.load(fp)
-            bos_token = config.get("bos_token")
+            bos_token = config.get("bos_token") #获取bos token
             self.bos_id = self.token_to_id(bos_token) if bos_token is not None else None
             self.eos_id = self.token_to_id(config["eos_token"])
         else:

@@ -15,3 +15,6 @@ python scripts/prepare_starcoder.py --source_path data/starcoderdata/ --tokenize
 /data/TinyLlama/out/code_tiny_LLaMA_1b_python_java_go_cpp_javascript/iter-032000-ckpt.pth
 
 python scripts/convert_lit_checkpoint.py --out_dir /data/TinyLlama/out/tiny_LLaMA_1b/ --checkpoint_name iter-100000-ckpt.pth --model_name tiny_LLaMA_1b
+
+# 处理数据集
+python scripts/prepare_slimpajama.py --source_path data/RedPajama-Data-1T-Sample --tokenizer_path checkpoints/lit-llama  --destination_path data/red_pajama_sample --split train --percentage 1.0

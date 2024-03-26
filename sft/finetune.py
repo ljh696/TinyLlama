@@ -112,13 +112,17 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     )
     output_dir: str = field(default='./output', metadata={"help": 'The output dir for logs and checkpoints'})
     optim: str = field(default='adamw_torch', metadata={"help": 'The optimizer to be used'})
+    #每个gpu的batch_size
     per_device_train_batch_size: int = field(default=16, metadata={"help": 'The training batch size per GPU. Increase for better speed.'})
+    #1:默认每次都更新而不累积梯度
     gradient_accumulation_steps: int = field(default=1, metadata={"help": 'How many gradients to accumulate before to perform an optimizer step'})
     max_steps: int = field(default=10000, metadata={"help": 'How many optimizer update steps to take'})
+    #L2 loss
     weight_decay: float = field(default=0.0, metadata={"help": 'The L2 weight decay rate of AdamW'})
     learning_rate: float = field(default=0.0002, metadata={"help": 'The learnign rate'})
     remove_unused_columns: bool = field(default=False, metadata={"help": 'Removed unused columns. Needed to make this codebase work.'})
     max_grad_norm: float = field(default=0.3, metadata={"help": 'Gradient clipping max norm. This is tuned and works well for all models tested.'})
+    #节省训练内存?
     gradient_checkpointing: bool = field(default=True, metadata={"help": 'Use gradient checkpointing. You want to use this.'})
     do_train: bool = field(default=True, metadata={"help": 'To train or not to train, that is the question?'})
     lr_scheduler_type: str = field(default='constant', metadata={"help": 'Learning rate schedule. Constant a bit better than cosine, and has advantage for analysis'})
@@ -164,12 +168,8 @@ class GenerationArguments:
 
 
 
-
+#TODO:函数未支持通过checkpoint_dir恢复训练的模型
 def get_accelerate_model(args, checkpoint_dir):
-
-
-
-
     device_map = "auto"
 
     # if we are in a distributed setting, we need to set the device map and max memory per device
@@ -177,15 +177,12 @@ def get_accelerate_model(args, checkpoint_dir):
         local_rank = int(os.environ.get('LOCAL_RANK', '0'))
         device_map = {'': local_rank}
 
-
     print(f'loading base model {args.model_name_or_path}...')
     model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         device_map=device_map,
         trust_remote_code=args.trust_remote_code,
     )
-
-
 
 
     # Tokenizer
@@ -198,6 +195,7 @@ def get_accelerate_model(args, checkpoint_dir):
     if tokenizer._pad_token is None:
         special_tokens_dict = dict(pad_token=DEFAULT_PAD_TOKEN)
         if args.dataset == "OpenAssistant/oasst_top1_2023-08-25":
+            #为chatllm添加额外的特殊token
             chat_special_tokens = ["<|im_start|>", "<|im_end|>"]
             special_tokens_dict.update(additional_special_tokens=chat_special_tokens)
 
@@ -238,9 +236,11 @@ def smart_tokenizer_and_embedding_resize(
     model.resize_token_embeddings(len(tokenizer))
     
     if num_new_tokens > 0:
-        input_embeddings_data = model.get_input_embeddings().weight.data
+        input_embeddings_data = model.get_input_embeddings().weight.data # embedding_size*tokens_num 
         output_embeddings_data = model.get_output_embeddings().weight.data
 
+        #-num_new_tokens去掉新添加的token,只对之前的token取平均
+        #将新生成的token映射的embedding vector看作原先所有token的平均向量
         input_embeddings_avg = input_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
         output_embeddings_avg = output_embeddings_data[:-num_new_tokens].mean(dim=0, keepdim=True)
 
@@ -258,14 +258,15 @@ class DataCollatorForCausalLM(object):
 
     def __call__(self, instances: Sequence[Dict]) -> Dict[str, torch.Tensor]:
         # Extract elements
+        # f-string构建sources列表,表示为每个[input]前添加开始符号[BOS]作为问题,标签添加[EOS]
         sources = [f"{self.tokenizer.bos_token}{example['input']}" for example in instances]
         targets = [f"{example['output']}{self.tokenizer.eos_token}" for example in instances]
         # Tokenize
         tokenized_sources_with_prompt = self.tokenizer(
-            sources,
+            sources,  #-text:需要分词的list[sequence]
             max_length=self.source_max_len,
-            truncation=True,
-            add_special_tokens=False,
+            truncation=True, #单个token序列剪枝到max_length长度
+            add_special_tokens=False, 
         )
         tokenized_targets = self.tokenizer(
             targets,
@@ -276,6 +277,8 @@ class DataCollatorForCausalLM(object):
         # Build the input and labels for causal LM
         input_ids = []
         labels = []
+        #input_ids即将token转化为id,用于嵌入向量的查询
+        #tokenized[input_ids]的输出应该是list(list(id))
         for tokenized_source, tokenized_target in zip(
             tokenized_sources_with_prompt['input_ids'],
             tokenized_targets['input_ids']
@@ -289,7 +292,9 @@ class DataCollatorForCausalLM(object):
                 else:
                     labels.append(torch.tensor(copy.deepcopy(tokenized_source + tokenized_target)))
             else:
+                #token_to_id序列
                 input_ids.append(torch.tensor(tokenized_source))
+    
         # Apply padding
         input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id)
         labels = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX) if not self.predict_with_generate else None
@@ -300,6 +305,7 @@ class DataCollatorForCausalLM(object):
         if labels is not None:
             data_dict['labels'] = labels
         return data_dict
+
 
 def extract_unnatural_instructions_data(examples, extract_reformulations=False):
     out = {
@@ -403,6 +409,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             else:
                 raise NotImplementedError(f"Dataset {dataset_name} not implemented yet.")
 
+    #修改数据集格式
     def format_dataset(dataset, dataset_format):
         if (
             dataset_format == 'alpaca' or dataset_format == 'alpaca-clean' or
@@ -468,6 +475,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
         train_on_source=args.train_on_source,
         predict_with_generate=args.predict_with_generate,
     )
+    #return dict{input_ids,labels}
     return dict(
         train_dataset=train_dataset if args.do_train else None,
         eval_dataset=eval_dataset if args.do_eval else None,
@@ -475,11 +483,14 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
         data_collator=data_collator
     )
 
+#return->checkpoint_dir, completed_training:bool
 def get_last_checkpoint(checkpoint_dir):
     if isdir(checkpoint_dir):
+        #检查指定目录中是否包含名为completed的文件
         is_completed = exists(join(checkpoint_dir, 'completed'))
         if is_completed: return None, True # already finished
         max_step = 0
+        #遍历目录中所有文件和子目录,若为目录且名字开头为checkpoint则根据filename得到其训练step
         for filename in os.listdir(checkpoint_dir):
             if isdir(join(checkpoint_dir, filename)) and filename.startswith('checkpoint'):
                 max_step = max(max_step, int(filename.replace('checkpoint-', '')))
@@ -490,6 +501,7 @@ def get_last_checkpoint(checkpoint_dir):
     return None, False # first training
 
 def train():
+    #将@dataclass类对象中的属性转换为可解析参数
     hfparser = transformers.HfArgumentParser((
         ModelArguments, DataArguments, TrainingArguments, GenerationArguments
     ))
@@ -501,10 +513,10 @@ def train():
     )
     print(args)
     
+    #检查是否有checkpoint(checkpoint_dir)
     checkpoint_dir, completed_training = get_last_checkpoint(args.output_dir)
     if completed_training:
         print('Detected that training was already completed!')
-
     model, tokenizer = get_accelerate_model(args, checkpoint_dir)
 
     model.config.use_cache = False
@@ -512,19 +524,15 @@ def train():
     set_seed(args.seed)
 
     data_module = make_data_module(tokenizer=tokenizer, args=args)
-    
+
     trainer = Seq2SeqTrainer(
         model=model,
         tokenizer=tokenizer,
         args=training_args,
+        #train+eval data collector(-predict_dataset)
         **{k:v for k,v in data_module.items() if k != 'predict_dataset'},
     )
 
-
-   
-        
-
-        
 
     # Verifying the datatypes and parameter counts before training.
     print_trainable_parameters(args, model)

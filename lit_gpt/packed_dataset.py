@@ -1,7 +1,9 @@
 # Very loosely inspired by indexed_dataset in Fairseq, Megatron
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/data/indexed_dataset.py
 
-
+from icecream import ic
+ic.configureOutput(prefix=f'Debug | ', includeContext=True)
+import traceback
 import os
 import random
 import struct
@@ -29,6 +31,7 @@ class PackedDataset(IterableDataset):
         self, filenames, n_chunks, block_size, seed=12345, shuffle=True, wrap=False, num_processes=1, process_rank=0
     ):
         self._filenames = filenames
+        traceback.print_stack()
         self._n_chunks = n_chunks
         self._block_size = block_size
         self._seed = seed
@@ -46,7 +49,6 @@ class PackedDataset(IterableDataset):
 
         max_num_files = len(self._filenames) // num_shards * num_shards
         filenames = self._filenames[shard_id:max_num_files:num_shards]
-
         return PackedDatasetIterator(
             filenames=filenames,
             n_chunks=self._n_chunks,
